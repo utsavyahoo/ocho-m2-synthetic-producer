@@ -1,0 +1,60 @@
+# OCTO M2 isolated synthetic OIDC PR proposal R2; NOT deployed.
+# Publish only under separately administered utsavyahoo repository by its custodian.
+# No source DB access, no signing keys, no Cloudflare POST, no production workloads.
+name: OCTO M2 synthetic OIDC preflight
+on:
+  workflow_dispatch:
+permissions: {}
+
+concurrency:
+  group: octo-m2-synthetic-preflight
+  cancel-in-progress: false
+jobs:
+  oidc-claims-preflight:
+    permissions:
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Request GitHub OIDC and validate isolated identity without printing token
+        env:
+          M2_EXPECTED_REPO_ID: "1446474795"
+          M2_EXPECTED_OWNER_ID: "352677113"
+          M2_EXPECTED_WORKFLOW_REF: "utsavyahoo/ocho-m2-synthetic-producer/.github/workflows/m2.yml@refs/heads/main"
+        run: |
+          node --input-type=module <<'NODE'
+          import {createHash} from 'node:crypto';
+          const requestUrl=process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+          const requestToken=process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+          if(!requestUrl||!requestToken)throw Error('OIDC_PERMISSION_MISSING');
+          const issuer=new URL(requestUrl);
+          if(issuer.protocol!=='https:'||!/(^|\.)actions\.githubusercontent\.com$/.test(issuer.hostname))
+            throw Error('UNEXPECTED_GITHUB_OIDC_ENDPOINT');
+          const url=new URL(requestUrl);
+          url.searchParams.set('audience','https://witness.invalid/fixture');
+          const reply=await fetch(url,{headers:{Authorization:'Bearer '+requestToken}});
+          if(!reply.ok)throw Error('OIDC_REQUEST_FAILED_'+reply.status);
+          const jwt=(await reply.json()).value;
+          if(typeof jwt!=='string'||jwt.split('.').length!==3)throw Error('INVALID_OIDC_TOKEN');
+          const claims=JSON.parse(Buffer.from(jwt.split('.')[1],'base64url').toString('utf8'));
+          const expected={
+            iss:'https://token.actions.githubusercontent.com',
+            aud:'https://witness.invalid/fixture',
+            repository_id:process.env.M2_EXPECTED_REPO_ID,
+            repository_owner_id:process.env.M2_EXPECTED_OWNER_ID,
+            workflow_ref:process.env.M2_EXPECTED_WORKFLOW_REF,
+            ref:'refs/heads/main',
+            event_name:'workflow_dispatch',
+            runner_environment:'github-hosted',
+            repository_visibility:'public',
+            ref_protected:'true'
+          };
+          for(const [k,v] of Object.entries(expected)){
+            if(claims[k]!==v)throw Error('OIDC_CLAIM_MISMATCH_'+k);
+          }
+          if(claims.run_id!==process.env.GITHUB_RUN_ID||claims.run_attempt!==process.env.GITHUB_RUN_ATTEMPT)
+            throw Error('OIDC_RUN_BINDING_FAILED');
+          console.log('M2_SYNTHETIC_OIDC_IDENTITY_CHECK=PASS');
+          console.log('TOKEN_SHA256='+createHash('sha256').update(jwt).digest('hex'));
+          console.log('NOTE=This tests GitHub OIDC claim shape only. It is NOT a producer signature or M2 PASS.');
+          NODE
